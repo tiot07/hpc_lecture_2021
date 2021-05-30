@@ -3,25 +3,43 @@
 #include <cmath>
 #include <vector>
 #include <chrono>
+#include <omp.h>
+#include <cstdlib>
 using namespace std;
+typedef vector<float> matrix;
+
+void matmult(matrix &subA, matrix &subB, matrix &subC, int N, int size, int rank, int irank) {
+  int offset = N/size*rank;
+    offset = N/size*((rank+irank) % size);
+// #pragma omp parallel for
+    for (int i=0; i<N/size; i++)
+      for (int k=0; k<N; k++)
+        for (int j=0; j<N/size; j++)
+          subC[N*i+j+offset] += subA[N*i+k] * subB[N/size*k+j];
+}
 
 int main(int argc, char** argv) {
-  int size, rank;
+  int size, rank, irank;
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-  const int N = 256;
+  const int N = 512;
+  vector<float> tmp(N*N/size,0);
   vector<float> A(N*N);
   vector<float> B(N*N);
   vector<float> C(N*N, 0);
   vector<float> subA(N*N/size);
   vector<float> subB(N*N/size);
   vector<float> subC(N*N/size, 0);
+  vector<float> subsubC(N*N/size, 0);
   vector<float> recv(N*N/size);
+  matmult(subA,subB,subC,N,size,rank,irank);
+  subC=subsubC;
   for (int i=0; i<N; i++) {
     for (int j=0; j<N; j++) {
       A[N*i+j] = drand48();
+      B[N*i+j] = drand48();
       B[N*i+j] = drand48();
     }
   }
@@ -35,14 +53,12 @@ int main(int argc, char** argv) {
   int recv_from = (rank + 1) % size;
   int send_to = (rank - 1 + size) % size;
 
+
   double comp_time = 0, comm_time = 0;
+#pragma omp parralel for private(i,j,k)// reduction(+:comm_time) reduction(+:comp_time)
   for(int irank=0; irank<size; irank++) {
     auto tic = chrono::steady_clock::now();
-    offset = N/size*((rank+irank) % size);
-    for (int i=0; i<N/size; i++)
-      for (int j=0; j<N/size; j++)
-        for (int k=0; k<N; k++)
-          subC[N*i+j+offset] += subA[N*i+k] * subB[N/size*k+j];
+    matmult(subA,subB,subC,N,size,rank,irank);
     auto toc = chrono::steady_clock::now();
     comp_time += chrono::duration<double>(toc - tic).count();
     MPI_Request request[2];
@@ -54,12 +70,13 @@ int main(int argc, char** argv) {
     tic = chrono::steady_clock::now();
     comm_time += chrono::duration<double>(tic - toc).count();
   }
+
   MPI_Allgather(&subC[0], N*N/size, MPI_FLOAT, &C[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
   for (int i=0; i<N; i++)
     for (int j=0; j<N; j++)
       for (int k=0; k<N; k++)
         C[N*i+j] -= A[N*i+k] * B[N*k+j];
-  double err = 0;
+  double err = 0; 
   for (int i=0; i<N; i++)
     for (int j=0; j<N; j++)
       err += fabs(C[N*i+j]);
